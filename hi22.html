@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Merge Drop Game - 독수리 오형제 얼굴 적용</title>
+<style>
+  :root{--bg:#1b1b1b;--panel:rgba(255,255,255,0.06)}
+  html,body{height:100%;margin:0;font-family:-apple-system,Segoe UI,Roboto,"Noto Sans KR",sans-serif;background:var(--bg);color:#fff}
+  .wrap{width:100%;height:100%;display:flex;align-items:center;justify-content:center}
+  .gameBox{width:420px;max-width:95%;background:linear-gradient(#2a2a2a,#1f1f1f);padding:12px;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,0.6);position:relative}
+  canvas{display:block;background:#111;border-radius:8px;touch-action:none}
+  #scoreBoard{position:absolute;left:12px;top:12px;background:var(--panel);padding:8px 10px;border-radius:8px;font-weight:600}
+  #overlayMsg{position:absolute;right:12px;top:12px;background:var(--panel);padding:8px 10px;border-radius:8px;text-align:right}
+  .centerOverlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+  .card{pointer-events:auto;background:#fff;color:#111;padding:16px 18px;border-radius:10px;min-width:220px;text-align:center}
+  button{background:#2ea44f;border:0;color:#fff;padding:8px 12px;border-radius:8px;font-weight:700;cursor:pointer}
+  small{display:block;margin-top:6px;color:#666}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="gameBox">
+    <div id="scoreBoard">점수: <span id="score">0</span> | 최고: <span id="best">0</span></div>
+    <div id="overlayMsg">드래그 → 놓기</div>
+    <canvas id="gameCanvas" width="400" height="720"></canvas>
+    <div id="centerOverlay" class="centerOverlay"></div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/matter-js@0.19.0/build/matter.min.js"></script>
+<script>
+// --- 설정 ---
+const { Engine, Render, Runner, Bodies, Composite, Events, Body } = Matter;
+const GAME_WIDTH = 400;
+const GAME_HEIGHT = 720;
+const canvas = document.getElementById('gameCanvas');
+canvas.width = GAME_WIDTH; canvas.height = GAME_HEIGHT;
+const centerOverlay = document.getElementById('centerOverlay');
+
+// 점수
+let score = 0;
+let best = Number(localStorage.getItem('merge_best')||0);
+document.getElementById('best').textContent = best;
+
+// 독수리 오형제 얼굴 이미지 프리로드
+const eagleFaceURL = 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/4c/Gatchaman_logo.png/128px-Gatchaman_logo.png';
+const eagleFaceImg = new Image();
+eagleFaceImg.crossOrigin = 'anonymous';
+let EAGLE_LOADED = false;
+eagleFaceImg.onload = () => {
+  EAGLE_LOADED = true;
+  startGame();
+};
+eagleFaceImg.onerror = () => {
+  console.warn('이미지 로드 실패 — 대체 색상 사용');
+  EAGLE_LOADED = false;
+  startGame();
+};
+eagleFaceImg.src = eagleFaceURL;
+
+// 반지름 계산 (8단계: 2~256)
+function getRadiusForValue(value) {
+    const step = Math.log2(value) - 1; // 2 -> 0단계
+    const baseRadius = 30;  // 최소 반지름
+    const stepIncrease = 6; // 단계별 증가폭
+    return baseRadius + step * stepIncrease;
+}
+
+// 공 생성 함수
+function createBall(x,y,value){
+    const radius = getRadiusForValue(value);
+    const options = { restitution:0.2, friction:0.02, density:0.002 };
+    if (EAGLE_LOADED){
+        options.render = {
+            sprite: {
+                texture: eagleFaceImg.src,
+                xScale: (radius*2) / eagleFaceImg.width,
+                yScale: (radius*2) / eagleFaceImg.height
+            }
+        };
+    } else {
+        options.render = { fillStyle: getColorForValue(value) };
+    }
+    const ball = Bodies.circle(x,y,radius, options);
+    ball.value = value;
+    return ball;
+}
+
+function getColorForValue(v){
+    const map = {2:'#eee4da',4:'#ede0c8',8:'#f2b179',16:'#f59563',32:'#f67c5f',64:'#f65e3b',128:'#edcf72',256:'#edcc61'};
+    return map[v] || '#cfcfcf';
+}
+
+function startGame(){
+    const engine = Engine.create();
+    const world = engine.world;
+    const render = Render.create({
+        canvas: canvas,
+        engine: engine,
+        options: {
+            width: GAME_WIDTH,
+            height: GAME_HEIGHT,
+            wireframes: false,
+            background: '#111'
+        }
+    });
+    Render.run(render);
+    const runner = Runner.create(); Runner.run(runner, engine);
+
+    // 벽/바닥
+    const wallThickness = 40;
+    const ground = Bodies.rectangle(GAME_WIDTH/2, GAME_HEIGHT + wallThickness/2, GAME_WIDTH, wallThickness, { isStatic:true, render:{fillStyle:'#0c0c0c'} });
+    const leftWall = Bodies.rectangle(-wallThickness/2, GAME_HEIGHT/2, wallThickness, GAME_HEIGHT, { isStatic:true, render:{visible:false} });
+    const rightWall = Bodies.rectangle(GAME_WIDTH + wallThickness/2, GAME_HEIGHT/2, wallThickness, GAME_HEIGHT, { isStatic:true, render:{visible:false} });
+    Composite.add(world, [ground, leftWall, rightWall]);
+
+    let currentBall = createBall(GAME_WIDTH/2, 70, 2);
+    Body.setStatic(currentBall, true);
+    Composite.add(world, currentBall);
+
+    // 드래그(포인터) 지원 — 마우스/터치 통합
+    canvas.style.touchAction = 'none';
+    let dragging = false;
+    let currentPointerId = null;
+
+    function clampX(x, r){ return Math.max(r, Math.min(GAME_WIDTH - r, x)); }
+
+    canvas.addEventListener('pointerdown', e => {
+        if (!currentBall) return;
+        dragging = true;
+        currentPointerId = e.pointerId;
+        canvas.setPointerCapture(currentPointerId);
+        moveCurrent(e);
+    });
+    window.addEventListener('pointermove', e => { if (!dragging || e.pointerId !== currentPointerId) return; moveCurrent(e); });
+    window.addEventListener('pointerup', e => { if (!dragging || e.pointerId !== currentPointerId) return; dragging = false; canvas.releasePointerCapture(currentPointerId); dropCurrent(); currentPointerId = null; });
+
+    function moveCurrent(e){
+        if (!currentBall) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = clampX(e.clientX - rect.left, currentBall.circleRadius || 30);
+        Body.setPosition(currentBall, { x: x, y: 70 });
+    }
+
+    function dropCurrent(){
+        if (!currentBall) return;
+        Body.setStatic(currentBall, false);
+        currentBall = null;
+        setTimeout(()=>{
+            const val = Math.random() < 0.6 ? 2 : 4;
+            currentBall = createBall(GAME_WIDTH/2, 70, val);
+            Body.setStatic(currentBall, true);
+            Composite.add(world, currentBall);
+        }, 380);
+    }
+
+    // 충돌 -> 합체 로직 (최대 256단계)
+    Events.on(engine, 'collisionStart', event => {
+        for (let pair of event.pairs){
+            const A = pair.bodyA; const B = pair.bodyB;
+            if (A.value && B.value && A.value === B.value && !A.isMerging && !B.isMerging){
+                if (A.value >= 256) return; // 최종 단계 합체 불가
+                A.isMerging = B.isMerging = true;
+                setTimeout(()=>{
+                    try {
+                        if (!world.bodies.includes(A) || !world.bodies.includes(B)) return;
+                        const newV = A.value * 2;
+                        const nx = (A.position.x + B.position.x)/2;
+                        const ny = (A.position.y + B.position.y)/2;
+                        Composite.remove(world, A);
+                        Composite.remove(world, B);
+                        const newBall = createBall(nx, ny, newV);
+                        Body.setVelocity(newBall, { x:0, y:-6 });
+                        Composite.add(world, newBall);
+                        score += newV;
+                        document.getElementById('score').textContent = score;
+                        if (score > best){
+                            best = score;
+                            localStorage.setItem('merge_best', best);
+                            document.getElementById('best').textContent = best;
+                        }
+                    } catch(err){ console.error('merge error', err); }
+                }, 0);
+            }
+        }
+    });
+
+    // 게임오버 체크 (블록이 너무 위로 쌓이면)
+    Events.on(engine, 'afterUpdate', () => {
+        for (let b of world.bodies){
+            if (!b.isStatic && b.position.y < -40){
+                showGameOver();
+                break;
+            }
+        }
+    });
+
+    // 게임오버 UI
+    let gameOverShown = false;
+    function showGameOver(){
+        if (gameOverShown) return; gameOverShown = true;
+        const card = document.createElement('div'); card.className='card';
+        card.innerHTML = `<h3 style="margin:0">게임 오버</h3><p style="margin:8px 0 0 0">점수: <strong>${score}</strong></p><div style="margin-top:12px"><button id=retryBtn>다시 시작</button></div>`;
+        centerOverlay.appendChild(card);
+        document.getElementById('retryBtn').addEventListener('click', ()=> location.reload());
+    }
+}
+</script>
+</body>
+</html>
